@@ -39,7 +39,7 @@ class RegistryServiceTest {
         when(servers.save(any(McpServer.class))).thenAnswer(inv -> inv.getArgument(0));
         when(tenants.resolveOrProvision(anyString())).thenReturn(ACME_ID);
         service = new RegistryService(servers, mock(ToolRepository.class), tenants,
-                mock(AuditService.class));
+                mock(AuditService.class), mock(RegistryEvents.class));
     }
 
     @Test

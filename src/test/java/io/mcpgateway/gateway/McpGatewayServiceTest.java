@@ -15,6 +15,9 @@ import io.mcpgateway.gateway.JsonRpc.Request;
 import io.mcpgateway.gateway.JsonRpc.Response;
 import io.mcpgateway.registry.McpServer;
 import io.mcpgateway.registry.RegistryService;
+import io.mcpgateway.registry.RouteSnapshot;
+import io.mcpgateway.registry.RouteSnapshot.ToolRoute;
+import io.mcpgateway.registry.RoutingService;
 import io.mcpgateway.registry.Tool;
 import io.mcpgateway.registry.ToolManifestHasher;
 import java.util.List;
@@ -28,8 +31,9 @@ import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.json.JsonMapper;
 
 /**
- * Pipeline enforcement (FR-GW-1, FR-REG-5, FR-REG-6): manifest drift quarantines, kill switch
- * hides, and the happy path proxies the backend result through untouched.
+ * Pipeline enforcement (FR-GW-1, FR-REG-5, FR-REG-6): manifest drift quarantines, transient
+ * backend failure denies without quarantining, kill switch hides, and the happy path proxies
+ * the backend result through untouched.
  */
 class McpGatewayServiceTest {
 
@@ -37,8 +41,10 @@ class McpGatewayServiceTest {
     private static final AuthenticatedActor ALICE =
             new AuthenticatedActor("sub-alice", "alice", "tenant-acme", Set.of("tool-user"));
     private static final String SCHEMA = "{\"type\":\"object\"}";
+    private static final UUID TOOL_ID = UUID.randomUUID();
 
     private RegistryService registry;
+    private RoutingService routing;
     private McpBackendClient backend;
     private AuditService audit;
     private McpGatewayService service;
@@ -46,15 +52,15 @@ class McpGatewayServiceTest {
     @BeforeEach
     void setUp() {
         registry = mock(RegistryService.class);
+        routing = mock(RoutingService.class);
         backend = mock(McpBackendClient.class);
         audit = mock(AuditService.class);
-        service = new McpGatewayService(registry, backend, audit, MAPPER);
+        service = new McpGatewayService(registry, routing, backend, audit, MAPPER);
     }
 
     @Test
     void happyPathProxiesBackendResultThrough() {
-        McpServer server = serverWithTool();
-        when(registry.visibleServerByName(ALICE, "crm")).thenReturn(Optional.of(server));
+        when(routing.route(ALICE, "crm")).thenReturn(Optional.of(route(true, Tool.Status.ACTIVE)));
         when(backend.listTools(anyString())).thenReturn(Optional.of(liveToolsMatchingManifest()));
         when(backend.callTool(anyString(), eq("crm.read"), any())).thenReturn(MAPPER.valueToTree(
                 Map.of("jsonrpc", "2.0", "result", Map.of("content", List.of("record-42")))));
@@ -67,8 +73,7 @@ class McpGatewayServiceTest {
 
     @Test
     void manifestDriftQuarantinesTheToolAndDeniesTheCall() {
-        McpServer server = serverWithTool();
-        when(registry.visibleServerByName(ALICE, "crm")).thenReturn(Optional.of(server));
+        when(routing.route(ALICE, "crm")).thenReturn(Optional.of(route(true, Tool.Status.ACTIVE)));
         // The backend now serves a different description than was pinned at registration.
         when(backend.listTools(anyString())).thenReturn(Optional.of(MAPPER.valueToTree(List.of(
                 Map.of("name", "crm.read",
@@ -78,28 +83,27 @@ class McpGatewayServiceTest {
         Response response = service.handle(ALICE, callRequest("crm.crm.read"));
 
         assertThat(response.error().code()).isEqualTo(JsonRpc.TOOL_QUARANTINED);
-        verify(registry).quarantineForDrift(eq(ALICE), any(), eq("crm.crm.read"));
+        verify(registry).quarantineForDrift(eq(ALICE), eq(TOOL_ID), eq("crm.crm.read"));
         verify(backend, never()).callTool(anyString(), anyString(), any());
     }
 
     @Test
-    void unreachableBackendCountsAsDriftNotAsTrust() {
-        McpServer server = serverWithTool();
-        when(registry.visibleServerByName(ALICE, "crm")).thenReturn(Optional.of(server));
+    void unreachableBackendDeniesTheCallButDoesNotQuarantine() {
+        when(routing.route(ALICE, "crm")).thenReturn(Optional.of(route(true, Tool.Status.ACTIVE)));
         when(backend.listTools(anyString())).thenThrow(new IllegalStateException("connection refused"));
 
         Response response = service.handle(ALICE, callRequest("crm.crm.read"));
 
-        assertThat(response.error().code()).isEqualTo(JsonRpc.TOOL_QUARANTINED);
+        // A network blip is not an attack: fail closed on the call, but don't force re-approval.
+        assertThat(response.error().code()).isEqualTo(JsonRpc.UPSTREAM_ERROR);
+        verify(registry, never()).quarantineForDrift(any(), any(), anyString());
         verify(backend, never()).callTool(anyString(), anyString(), any());
     }
 
     @Test
     void killedServerAnswersExactlyLikeUnknownServer() {
-        McpServer killed = serverWithTool();
-        killed.setEnabled(false);
-        when(registry.visibleServerByName(ALICE, "crm")).thenReturn(Optional.of(killed));
-        when(registry.visibleServerByName(ALICE, "ghost")).thenReturn(Optional.empty());
+        when(routing.route(ALICE, "crm")).thenReturn(Optional.of(route(false, Tool.Status.ACTIVE)));
+        when(routing.route(ALICE, "ghost")).thenReturn(Optional.empty());
 
         Response killedResponse = service.handle(ALICE, callRequest("crm.crm.read"));
         Response unknownResponse = service.handle(ALICE, callRequest("ghost.crm.read"));
@@ -110,9 +114,19 @@ class McpGatewayServiceTest {
     }
 
     @Test
+    void quarantinedToolIsDeniedWithoutTouchingTheBackend() {
+        when(routing.route(ALICE, "crm")).thenReturn(Optional.of(route(true, Tool.Status.QUARANTINED)));
+
+        Response response = service.handle(ALICE, callRequest("crm.crm.read"));
+
+        assertThat(response.error().code()).isEqualTo(JsonRpc.TOOL_QUARANTINED);
+        verify(backend, never()).listTools(anyString());
+    }
+
+    @Test
     void toolsListOmitsKilledServersAndNonCallableTools() {
-        McpServer live = serverWithTool();
-        McpServer killed = serverWithTool();
+        McpServer live = entityServerWithTool();
+        McpServer killed = entityServerWithTool();
         killed.setEnabled(false);
         McpServer quarantinedOnly = new McpServer(null, "q", "http://q", null);
         Tool quarantined = new Tool("t", null, SCHEMA, Tool.SensitivityTier.INTERNAL, "h");
@@ -128,7 +142,14 @@ class McpGatewayServiceTest {
                 .isEqualTo("crm.crm.read");
     }
 
-    private static McpServer serverWithTool() {
+    private static RouteSnapshot route(boolean enabled, Tool.Status toolStatus) {
+        return new RouteSnapshot(UUID.randomUUID(), "crm", "http://crm:9090", enabled,
+                List.of(new ToolRoute(TOOL_ID, "crm.read", "Reads records", SCHEMA,
+                        Tool.SensitivityTier.INTERNAL, toolStatus,
+                        ToolManifestHasher.hash("crm.read", "Reads records", SCHEMA))));
+    }
+
+    private static McpServer entityServerWithTool() {
         McpServer server = new McpServer(UUID.randomUUID(), "crm", "http://crm:9090", null);
         server.addTool(new Tool("crm.read", "Reads records", SCHEMA, Tool.SensitivityTier.INTERNAL,
                 ToolManifestHasher.hash("crm.read", "Reads records", SCHEMA)));

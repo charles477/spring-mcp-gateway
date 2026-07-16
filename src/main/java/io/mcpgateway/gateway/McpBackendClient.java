@@ -1,8 +1,13 @@
 package io.mcpgateway.gateway;
 
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
+import java.time.Duration;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 import tools.jackson.databind.JsonNode;
@@ -10,17 +15,27 @@ import tools.jackson.databind.JsonNode;
 /**
  * HTTP client for backend MCP servers speaking JSON-RPC 2.0 over POST (streamable HTTP transport).
  *
- * <p>This is the only place gateway code talks to a backend, so connection concerns
- * (timeouts, and later circuit breaking per FR-GW-2) concentrate here instead of leaking
- * into routing logic.
+ * <p>This is the only place gateway code talks to a backend, so connection concerns concentrate
+ * here: request timeouts, and one circuit breaker per backend so a failing server sheds load
+ * fast without dragging down calls routed to healthy ones (FR-GW-2). Breaker-open failures
+ * surface as the same RuntimeException contract callers already handle.
  */
 @Component
 public class McpBackendClient {
 
     private final RestClient restClient;
+    private final CircuitBreakerRegistry breakers;
 
     public McpBackendClient(RestClient.Builder builder) {
-        this.restClient = builder.build();
+        SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
+        requestFactory.setConnectTimeout(Duration.ofSeconds(3));
+        requestFactory.setReadTimeout(Duration.ofSeconds(15));
+        this.restClient = builder.requestFactory(requestFactory).build();
+        this.breakers = CircuitBreakerRegistry.of(CircuitBreakerConfig.custom()
+                .slidingWindowSize(10)
+                .failureRateThreshold(50)
+                .waitDurationInOpenState(Duration.ofSeconds(30))
+                .build());
     }
 
     /**
@@ -50,11 +65,12 @@ public class McpBackendClient {
                 ? Map.of("jsonrpc", "2.0", "id", UUID.randomUUID().toString(), "method", method)
                 : Map.of("jsonrpc", "2.0", "id", UUID.randomUUID().toString(), "method", method,
                         "params", params);
-        return restClient.post()
+        CircuitBreaker breaker = breakers.circuitBreaker(baseUrl);
+        return breaker.executeSupplier(() -> restClient.post()
                 .uri(baseUrl)
                 .header("Content-Type", "application/json")
                 .body(request)
                 .retrieve()
-                .body(JsonNode.class);
+                .body(JsonNode.class));
     }
 }
