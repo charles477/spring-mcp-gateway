@@ -4,6 +4,21 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-07-16
+
+### Added
+- Dynamic MCP server/tool registration with platform-shared vs tenant-private
+  ownership scopes (FR-REG-1, FR-REG-4); just-in-time tenant provisioning from JWT
+- `POST /mcp` JSON-RPC 2.0 endpoint (`tools/list`, `tools/call`) exposing tools as
+  `<server>.<tool>` across aggregated backends (FR-GW-1)
+- Rug-pull defense (FR-REG-5): tool definitions content-hashed at registration;
+  live-definition drift auto-quarantines; `POST /admin/tools/{id}/reapprove` re-pins
+- Kill switch (FR-REG-6): `PATCH /admin/servers/{id}/enabled`, enforced from the
+  node-local cache; killed servers indistinguishable from unknown ones
+- Append-only async audit trail — exactly one record per request (FR-AUDIT-1/2)
+- Node-local routing cache with Redis pub/sub invalidation across nodes (FR-REG-3)
+- Circuit breaker per backend with connect/read timeouts (FR-GW-2)
+
 ## [0.2.0] - 2026-07-16
 
 ### Added
@@ -33,5 +48,6 @@ All notable changes to this project are documented here. The format follows
 - Requirements specification with per-requirement acceptance criteria (`docs/REQUIREMENTS.md`)
 - README with architecture and prior-art comparison; contribution conventions (`CONTRIBUTING.md`)
 
+[0.3.0]: https://github.com/charles477/spring-mcp-gateway/releases/tag/v0.3.0
 [0.2.0]: https://github.com/charles477/spring-mcp-gateway/releases/tag/v0.2.0
 [0.1.0]: https://github.com/charles477/spring-mcp-gateway/releases/tag/v0.1.0
