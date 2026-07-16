@@ -9,6 +9,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import io.mcpgateway.audit.AuditService;
 import io.mcpgateway.common.AuthenticatedActor;
 import io.mcpgateway.registry.RegistryService.ToolManifest;
 import io.mcpgateway.tenancy.TenantDirectory;
@@ -37,7 +38,8 @@ class RegistryServiceTest {
         tenants = mock(TenantDirectory.class);
         when(servers.save(any(McpServer.class))).thenAnswer(inv -> inv.getArgument(0));
         when(tenants.resolveOrProvision(anyString())).thenReturn(ACME_ID);
-        service = new RegistryService(servers, tenants);
+        service = new RegistryService(servers, mock(ToolRepository.class), tenants,
+                mock(AuditService.class));
     }
 
     @Test

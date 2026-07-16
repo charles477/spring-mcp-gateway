@@ -18,7 +18,8 @@ public interface McpServerRepository extends JpaRepository<McpServer, UUID> {
             + "where s.ownerTenantId is null or s.ownerTenantId = :tenantId")
     List<McpServer> findAllVisibleTo(@Param("tenantId") UUID tenantId);
 
-    Optional<McpServer> findByOwnerTenantIdIsNullAndName(String name);
-
-    Optional<McpServer> findByOwnerTenantIdAndName(UUID ownerTenantId, String name);
+    /** Resolves one visible server by name for routing; tools fetch-joined for the same reason. */
+    @Query("select s from McpServer s left join fetch s.tools "
+            + "where (s.ownerTenantId is null or s.ownerTenantId = :tenantId) and s.name = :name")
+    Optional<McpServer> findVisibleByName(@Param("tenantId") UUID tenantId, @Param("name") String name);
 }

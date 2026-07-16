@@ -1,8 +1,11 @@
 package io.mcpgateway.registry;
 
+import io.mcpgateway.audit.AuditRecord.Decision;
+import io.mcpgateway.audit.AuditService;
 import io.mcpgateway.common.AuthenticatedActor;
 import io.mcpgateway.tenancy.TenantDirectory;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -24,11 +27,16 @@ public class RegistryService {
     private static final Logger log = LoggerFactory.getLogger(RegistryService.class);
 
     private final McpServerRepository servers;
+    private final ToolRepository tools;
     private final TenantDirectory tenants;
+    private final AuditService audit;
 
-    public RegistryService(McpServerRepository servers, TenantDirectory tenants) {
+    public RegistryService(McpServerRepository servers, ToolRepository tools,
+                           TenantDirectory tenants, AuditService audit) {
         this.servers = servers;
+        this.tools = tools;
         this.tenants = tenants;
+        this.audit = audit;
     }
 
     /**
@@ -58,6 +66,86 @@ public class RegistryService {
     @Transactional(readOnly = true)
     public List<McpServer> visibleServers(AuthenticatedActor actor) {
         return servers.findAllVisibleTo(tenants.resolveOrProvision(actor.tenantId()));
+    }
+
+    /** Resolves one visible server by name for routing (FR-REG-4 scoping applied in the query). */
+    @Transactional(readOnly = true)
+    public Optional<McpServer> visibleServerByName(AuthenticatedActor actor, String serverName) {
+        return servers.findVisibleByName(tenants.resolveOrProvision(actor.tenantId()), serverName);
+    }
+
+    /**
+     * Kill switch at server granularity (FR-REG-6): platform-admin for any server, tenant-admin
+     * only for servers their tenant owns. Both directions are audited.
+     */
+    @Transactional
+    public void setServerEnabled(AuthenticatedActor actor, UUID serverId, boolean enabled) {
+        McpServer server = servers.findById(serverId)
+                .orElseThrow(() -> new IllegalArgumentException("Unknown server " + serverId));
+        requireAdminOver(actor, server);
+        server.setEnabled(enabled);
+        log.warn("kill switch: server '{}' {} by {}", server.getName(),
+                enabled ? "restored" : "disabled", actor.username());
+        audit.record(actor, "registry/kill-switch", server.getName(), Decision.ALLOWED,
+                enabled ? "server restored" : "server disabled", 0);
+    }
+
+    /**
+     * Quarantines a tool after manifest drift (FR-REG-5). Called by the gateway pipeline, not an
+     * admin — the tripwire must fire without human involvement.
+     */
+    @Transactional
+    public void quarantineForDrift(AuthenticatedActor actor, UUID toolId, String qualifiedName) {
+        tools.findById(toolId).ifPresent(tool -> {
+            tool.quarantine();
+            log.warn("quarantined tool {} after manifest drift, flagged during call by {}",
+                    qualifiedName, actor.username());
+            audit.record(actor, "registry/quarantine", qualifiedName, Decision.QUARANTINED,
+                    "live tool definition no longer matches pinned manifest", 0);
+        });
+    }
+
+    /**
+     * Re-approves a quarantined tool under a freshly pinned manifest (FR-REG-5): an explicit
+     * admin decision that the backend's current definition is trusted again.
+     */
+    @Transactional
+    public void reapproveTool(AuthenticatedActor actor, UUID toolId, String name,
+                              String description, String inputSchema) {
+        Tool tool = tools.findById(toolId)
+                .orElseThrow(() -> new IllegalArgumentException("Unknown tool " + toolId));
+        requireAdminOver(actor, tool.getServer());
+        tool.reapprove(ToolManifestHasher.hash(name, description, inputSchema));
+        log.info("tool {} re-approved with new manifest by {}", tool.getName(), actor.username());
+        audit.record(actor, "registry/reapprove", tool.getName(), Decision.ALLOWED,
+                "tool re-approved under new pinned manifest", 0);
+    }
+
+    /**
+     * Resolves where a tool lives so re-approval can fetch the backend's live definition.
+     * Runs the same admin check as the mutation it precedes, so location can't be probed.
+     */
+    @Transactional(readOnly = true)
+    public ToolLocation locateToolForAdmin(AuthenticatedActor actor, UUID toolId) {
+        Tool tool = tools.findById(toolId)
+                .orElseThrow(() -> new IllegalArgumentException("Unknown tool " + toolId));
+        requireAdminOver(actor, tool.getServer());
+        return new ToolLocation(tool.getId(), tool.getName(), tool.getServer().getBaseUrl());
+    }
+
+    /** Where a registered tool is served from. */
+    public record ToolLocation(UUID toolId, String toolName, String baseUrl) {
+    }
+
+    private void requireAdminOver(AuthenticatedActor actor, McpServer server) {
+        if (actor.hasRole("platform-admin")) {
+            return;
+        }
+        boolean ownsIt = actor.hasRole("tenant-admin") && !server.isPlatformShared()
+                && server.getOwnerTenantId().equals(tenants.resolveOrProvision(actor.tenantId()));
+        if (!ownsIt) {
+            throw new AccessDeniedException("Not an administrator of this server");
+        }
     }
 
     private UUID resolveOwnerTenant(AuthenticatedActor actor, boolean shared) {

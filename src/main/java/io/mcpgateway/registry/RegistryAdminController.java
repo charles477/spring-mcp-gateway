@@ -13,6 +13,8 @@ import java.util.UUID;
 import org.hibernate.validator.constraints.URL;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -52,6 +54,20 @@ public class RegistryAdminController {
     @GetMapping
     public List<ServerResponse> list(GatewayAuthenticationToken auth) {
         return registry.visibleServers(auth.actor()).stream().map(ServerResponse::from).toList();
+    }
+
+    /**
+     * Kill switch (FR-REG-6): one call disables or restores a server. Ownership rules are
+     * enforced in the service; both directions produce audit events.
+     */
+    @PatchMapping("/{serverId}/enabled")
+    public void setEnabled(GatewayAuthenticationToken auth, @PathVariable UUID serverId,
+                           @Valid @RequestBody KillSwitchRequest request) {
+        registry.setServerEnabled(auth.actor(), serverId, request.enabled());
+    }
+
+    /** Kill-switch payload: {@code enabled=false} disables, {@code true} restores. */
+    public record KillSwitchRequest(@NotNull Boolean enabled) {
     }
 
     /** Registration payload; {@code shared} requires the platform-admin role. */
