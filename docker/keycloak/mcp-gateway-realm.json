@@ -1,0 +1,71 @@
+{
+  "realm": "mcp-gateway",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "accessTokenLifespan": 3600,
+  "roles": {
+    "realm": [
+      { "name": "platform-admin", "description": "Full administrative access to the gateway across all tenants" },
+      { "name": "tenant-admin", "description": "Administers a single tenant's policies, server registrations, and users" },
+      { "name": "tool-user", "description": "Can invoke tools permitted by policy" },
+      { "name": "tool-approver", "description": "Can approve or reject pending restricted-tool calls" }
+    ]
+  },
+  "users": [
+    {
+      "username": "admin",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "admin@mcp-gateway.local",
+      "credentials": [{ "type": "password", "value": "admin123", "temporary": false }],
+      "realmRoles": ["platform-admin"],
+      "attributes": { "tenant_id": ["platform"] }
+    },
+    {
+      "username": "alice",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "alice@acme.local",
+      "credentials": [{ "type": "password", "value": "alice123", "temporary": false }],
+      "realmRoles": ["tool-user"],
+      "attributes": { "tenant_id": ["tenant-acme"] }
+    },
+    {
+      "username": "bob",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "bob@acme.local",
+      "credentials": [{ "type": "password", "value": "bob123", "temporary": false }],
+      "realmRoles": ["tenant-admin", "tool-approver"],
+      "attributes": { "tenant_id": ["tenant-acme"] }
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "mcp-gateway-client",
+      "enabled": true,
+      "publicClient": true,
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": true,
+      "redirectUris": ["*"],
+      "webOrigins": ["*"],
+      "protocolMappers": [
+        {
+          "name": "tenant_id",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "userinfo.token.claim": "true",
+            "user.attribute": "tenant_id",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "tenant_id",
+            "jsonType.label": "String"
+          }
+        }
+      ]
+    }
+  ]
+}
