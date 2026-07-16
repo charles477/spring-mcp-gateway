@@ -1,0 +1,41 @@
+spring:
+  application:
+    name: spring-mcp-gateway
+
+  datasource:
+    url: ${GATEWAY_DB_URL:jdbc:postgresql://localhost:5433/mcpgateway}
+    username: ${GATEWAY_DB_USER:mcpgateway}
+    password: ${GATEWAY_DB_PASSWORD:mcpgateway}
+
+  jpa:
+    open-in-view: false
+    hibernate:
+      # Flyway owns the schema; Hibernate only validates against it.
+      ddl-auto: validate
+
+  flyway:
+    locations: classpath:db/migration
+
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # Any OIDC-compliant IdP works here — issuer swap is config-only (FR-AUTHN-2).
+          issuer-uri: ${GATEWAY_OIDC_ISSUER:http://localhost:8081/realms/mcp-gateway}
+
+server:
+  port: 8080
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+
+gateway:
+  auth:
+    # JWT claim carrying the tenant identifier (FR-TENANT-2).
+    tenant-claim: tenant_id
+    # JSON path of the roles list inside the IdP token. Keycloak default shown;
+    # Okta/Azure AD map their group/role claim here instead.
+    roles-claim: realm_access.roles

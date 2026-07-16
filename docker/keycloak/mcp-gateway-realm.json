@@ -12,11 +12,26 @@
       { "name": "tool-approver", "description": "Can approve or reject pending restricted-tool calls" }
     ]
   },
+  "components": {
+    "org.keycloak.userprofile.UserProfileProvider": [
+      {
+        "providerId": "declarative-user-profile",
+        "subComponents": {},
+        "config": {
+          "kc.user.profile.config": [
+            "{\"attributes\":[{\"name\":\"username\",\"displayName\":\"${username}\",\"validations\":{\"length\":{\"min\":3,\"max\":255},\"username-prohibited-characters\":{},\"up-username-not-idn-homograph\":{}},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false},{\"name\":\"email\",\"displayName\":\"${email}\",\"validations\":{\"email\":{},\"length\":{\"max\":255}},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false},{\"name\":\"firstName\",\"displayName\":\"${firstName}\",\"validations\":{\"length\":{\"max\":255},\"person-name-prohibited-characters\":{}},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false},{\"name\":\"lastName\",\"displayName\":\"${lastName}\",\"validations\":{\"length\":{\"max\":255},\"person-name-prohibited-characters\":{}},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false}],\"groups\":[{\"name\":\"user-metadata\",\"displayHeader\":\"User metadata\",\"displayDescription\":\"Attributes, which refer to user metadata\"}],\"unmanagedAttributePolicy\":\"ENABLED\"}"
+          ]
+        }
+      }
+    ]
+  },
   "users": [
     {
       "username": "admin",
       "enabled": true,
       "emailVerified": true,
+      "firstName": "Platform",
+      "lastName": "Admin",
       "email": "admin@mcp-gateway.local",
       "credentials": [{ "type": "password", "value": "admin123", "temporary": false }],
       "realmRoles": ["platform-admin"],
@@ -26,6 +41,8 @@
       "username": "alice",
       "enabled": true,
       "emailVerified": true,
+      "firstName": "Alice",
+      "lastName": "Anderson",
       "email": "alice@acme.local",
       "credentials": [{ "type": "password", "value": "alice123", "temporary": false }],
       "realmRoles": ["tool-user"],
@@ -35,6 +52,8 @@
       "username": "bob",
       "enabled": true,
       "emailVerified": true,
+      "firstName": "Bob",
+      "lastName": "Baker",
       "email": "bob@acme.local",
       "credentials": [{ "type": "password", "value": "bob123", "temporary": false }],
       "realmRoles": ["tenant-admin", "tool-approver"],

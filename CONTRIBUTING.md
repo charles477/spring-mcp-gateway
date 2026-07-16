@@ -34,7 +34,7 @@ Rules:
 ## Branching: trunk-based with short-lived feature branches
 
 - `main` is always releasable; direct commits to `main` are limited to `docs`/`chore` trivia.
-- Each module or feature gets a short-lived branch: `feat/authn-oidc`, `feat/policy-engine`, `fix/audit-tenant-scope`.
+- Each module or feature gets a short-lived branch: `feature/authn-oidc`, `feature/policy-engine`, `fix/audit-tenant-scope`.
 - Branches merge to `main` via pull request. CI (`mvn verify`) must pass before merge. Squash only when the branch history is noisy; otherwise merge with history intact.
 
 ## Versioning: SemVer, tagged per phase
