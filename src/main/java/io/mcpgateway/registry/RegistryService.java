@@ -30,13 +30,15 @@ public class RegistryService {
     private final ToolRepository tools;
     private final TenantDirectory tenants;
     private final AuditService audit;
+    private final RegistryEvents events;
 
     public RegistryService(McpServerRepository servers, ToolRepository tools,
-                           TenantDirectory tenants, AuditService audit) {
+                           TenantDirectory tenants, AuditService audit, RegistryEvents events) {
         this.servers = servers;
         this.tools = tools;
         this.tenants = tenants;
         this.audit = audit;
+        this.events = events;
     }
 
     /**
@@ -57,6 +59,7 @@ public class RegistryService {
                     ToolManifestHasher.hash(tool.name(), tool.description(), tool.inputSchema())));
         }
         McpServer saved = servers.save(server);
+        events.serverChanged(name);
         log.info("registered {} server '{}' ({} tools) by {}",
                 shared ? "platform-shared" : "tenant-private", name, manifest.size(), actor.username());
         return saved;
@@ -84,6 +87,7 @@ public class RegistryService {
                 .orElseThrow(() -> new IllegalArgumentException("Unknown server " + serverId));
         requireAdminOver(actor, server);
         server.setEnabled(enabled);
+        events.serverChanged(server.getName());
         log.warn("kill switch: server '{}' {} by {}", server.getName(),
                 enabled ? "restored" : "disabled", actor.username());
         audit.record(actor, "registry/kill-switch", server.getName(), Decision.ALLOWED,
@@ -98,6 +102,7 @@ public class RegistryService {
     public void quarantineForDrift(AuthenticatedActor actor, UUID toolId, String qualifiedName) {
         tools.findById(toolId).ifPresent(tool -> {
             tool.quarantine();
+            events.serverChanged(tool.getServer().getName());
             log.warn("quarantined tool {} after manifest drift, flagged during call by {}",
                     qualifiedName, actor.username());
             audit.record(actor, "registry/quarantine", qualifiedName, Decision.QUARANTINED,
@@ -116,6 +121,7 @@ public class RegistryService {
                 .orElseThrow(() -> new IllegalArgumentException("Unknown tool " + toolId));
         requireAdminOver(actor, tool.getServer());
         tool.reapprove(ToolManifestHasher.hash(name, description, inputSchema));
+        events.serverChanged(tool.getServer().getName());
         log.info("tool {} re-approved with new manifest by {}", tool.getName(), actor.username());
         audit.record(actor, "registry/reapprove", tool.getName(), Decision.ALLOWED,
                 "tool re-approved under new pinned manifest", 0);

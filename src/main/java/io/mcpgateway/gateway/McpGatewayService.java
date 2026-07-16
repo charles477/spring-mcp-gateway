@@ -7,6 +7,9 @@ import io.mcpgateway.gateway.JsonRpc.Request;
 import io.mcpgateway.gateway.JsonRpc.Response;
 import io.mcpgateway.registry.McpServer;
 import io.mcpgateway.registry.RegistryService;
+import io.mcpgateway.registry.RouteSnapshot;
+import io.mcpgateway.registry.RouteSnapshot.ToolRoute;
+import io.mcpgateway.registry.RoutingService;
 import io.mcpgateway.registry.Tool;
 import io.mcpgateway.registry.ToolManifestHasher;
 import java.util.ArrayList;
@@ -20,9 +23,9 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
 /**
- * The MCP request pipeline (FR-GW-1): resolves the qualified tool, applies registry-level
- * enforcement (visibility, kill switch, quarantine, manifest verification), proxies to the
- * backend, and audits every outcome exactly once (FR-AUDIT-1).
+ * The MCP request pipeline (FR-GW-1): resolves the qualified tool through the routing cache,
+ * applies registry-level enforcement (visibility, kill switch, quarantine, manifest
+ * verification), proxies to the backend, and audits every request exactly once (FR-AUDIT-1).
  *
  * <p>Tools are exposed to agents as {@code <server>.<tool>} — the gateway aggregates many
  * backends behind one endpoint, so names must carry their routing scope.
@@ -33,13 +36,15 @@ public class McpGatewayService {
     private static final Logger log = LoggerFactory.getLogger(McpGatewayService.class);
 
     private final RegistryService registry;
+    private final RoutingService routing;
     private final McpBackendClient backend;
     private final AuditService audit;
     private final ObjectMapper objectMapper;
 
-    public McpGatewayService(RegistryService registry, McpBackendClient backend,
-                             AuditService audit, ObjectMapper objectMapper) {
+    public McpGatewayService(RegistryService registry, RoutingService routing,
+                             McpBackendClient backend, AuditService audit, ObjectMapper objectMapper) {
         this.registry = registry;
+        this.routing = routing;
         this.backend = backend;
         this.audit = audit;
         this.objectMapper = objectMapper;
@@ -57,7 +62,8 @@ public class McpGatewayService {
 
     /**
      * Aggregated tool list, already filtered to what this actor may see: visible servers
-     * (FR-REG-4) that are enabled (FR-REG-6), with only callable tools (FR-REG-5).
+     * (FR-REG-4) that are enabled (FR-REG-6), with only callable tools (FR-REG-5). Reads the
+     * database directly rather than the cache so a fresh registration is listed immediately.
      */
     private Response listTools(AuthenticatedActor actor, Request request) {
         long started = System.currentTimeMillis();
@@ -92,69 +98,76 @@ public class McpGatewayService {
         String serverName = qualifiedName.substring(0, split);
         String toolName = qualifiedName.substring(split + 1);
 
-        Optional<McpServer> serverLookup = registry.visibleServerByName(actor, serverName);
-        if (serverLookup.isEmpty() || !serverLookup.get().isEnabled()) {
+        Optional<RouteSnapshot> routeLookup = routing.route(actor, serverName);
+        if (routeLookup.isEmpty() || !routeLookup.get().enabled()) {
             // Disabled and invisible servers answer identically, so probing can't distinguish
             // "exists but killed" from "not yours" (FR-REG-4, FR-REG-6).
             return deny(actor, request, qualifiedName, started, JsonRpc.DENIED,
                     "Unknown tool: " + qualifiedName);
         }
-        McpServer server = serverLookup.get();
-        Optional<Tool> toolLookup = server.getTools().stream()
-                .filter(t -> t.getName().equals(toolName)).findFirst();
+        RouteSnapshot route = routeLookup.get();
+        Optional<ToolRoute> toolLookup = route.tool(toolName);
         if (toolLookup.isEmpty()) {
             return deny(actor, request, qualifiedName, started, JsonRpc.DENIED,
                     "Unknown tool: " + qualifiedName);
         }
-        Tool tool = toolLookup.get();
-        if (!tool.isCallable()) {
+        ToolRoute tool = toolLookup.get();
+        if (!tool.callable()) {
             return deny(actor, request, qualifiedName, started, JsonRpc.TOOL_QUARANTINED,
-                    "Tool is not callable (status " + tool.getStatus() + ")");
+                    "Tool is not callable (status " + tool.status() + ")");
         }
-        if (manifestDrifted(server, tool)) {
-            registry.quarantineForDrift(actor, tool.getId(), qualifiedName);
+        return verifyManifestAndProxy(actor, request, route, tool, qualifiedName, started);
+    }
+
+    /**
+     * Rug-pull tripwire (FR-REG-5), then the proxy. Verification distinguishes two failure
+     * classes deliberately: an <em>unreachable</em> backend denies the call but leaves the tool
+     * alone (a network blip is not an attack, and must not force an admin re-approval), while a
+     * <em>successful listing</em> that no longer matches the pinned hash — or no longer contains
+     * the tool — quarantines it.
+     */
+    private Response verifyManifestAndProxy(AuthenticatedActor actor, Request request,
+                                            RouteSnapshot route, ToolRoute tool,
+                                            String qualifiedName, long started) {
+        Optional<JsonNode> liveTools;
+        try {
+            liveTools = backend.listTools(route.baseUrl());
+        } catch (RuntimeException e) {
+            log.warn("manifest verification: backend {} unreachable: {}", route.serverName(), e.getMessage());
+            return deny(actor, request, qualifiedName, started, JsonRpc.UPSTREAM_ERROR,
+                    "Cannot verify tool manifest: backend unreachable");
+        }
+        if (manifestDrifted(liveTools, tool)) {
+            registry.quarantineForDrift(actor, tool.id(), qualifiedName);
             // The quarantine event above is the registry's record; this one is the request's
             // own audit row — every request gets exactly one (FR-AUDIT-1).
             return deny(actor, request, qualifiedName, started, JsonRpc.TOOL_QUARANTINED,
                     "Tool quarantined: live definition no longer matches its approved manifest");
         }
-        return proxy(actor, request, server, tool, qualifiedName, started);
+        return proxy(actor, request, route, tool, qualifiedName, started);
     }
 
-    /**
-     * Rug-pull tripwire (FR-REG-5): compares the backend's live definition against the hash
-     * pinned at registration. A backend that is unreachable or no longer lists the tool counts
-     * as drifted — absence of proof is not proof of innocence for a security check.
-     */
-    private boolean manifestDrifted(McpServer server, Tool tool) {
-        Optional<JsonNode> liveTools;
-        try {
-            liveTools = backend.listTools(server.getBaseUrl());
-        } catch (RuntimeException e) {
-            log.warn("manifest verification: backend {} unreachable: {}", server.getName(), e.getMessage());
-            return true;
-        }
+    private boolean manifestDrifted(Optional<JsonNode> liveTools, ToolRoute tool) {
         if (liveTools.isEmpty()) {
             return true;
         }
         for (JsonNode live : liveTools.get()) {
-            if (tool.getName().equals(live.path("name").asString(""))) {
+            if (tool.name().equals(live.path("name").asString(""))) {
                 String liveHash = ToolManifestHasher.hash(
                         live.path("name").asString(""),
                         live.path("description").isMissingNode() ? null : live.path("description").asString(),
                         live.path("inputSchema").toString());
-                return !liveHash.equals(tool.getManifestHash());
+                return !liveHash.equals(tool.manifestHash());
             }
         }
         return true;
     }
 
-    private Response proxy(AuthenticatedActor actor, Request request, McpServer server, Tool tool,
-                           String qualifiedName, long started) {
+    private Response proxy(AuthenticatedActor actor, Request request, RouteSnapshot route,
+                           ToolRoute tool, String qualifiedName, long started) {
         JsonNode upstream;
         try {
-            upstream = backend.callTool(server.getBaseUrl(), tool.getName(),
-                    request.params().path("arguments"));
+            upstream = backend.callTool(route.baseUrl(), tool.name(), request.params().path("arguments"));
         } catch (RuntimeException e) {
             log.error("backend call failed for {}: {}", qualifiedName, e.getMessage());
             audit.record(actor, "tools/call", qualifiedName, Decision.ERROR,
