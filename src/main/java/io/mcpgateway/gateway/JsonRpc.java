@@ -15,6 +15,8 @@ public final class JsonRpc {
     public static final int DENIED = -32000;
     public static final int TOOL_QUARANTINED = -32001;
     public static final int UPSTREAM_ERROR = -32002;
+    public static final int RATE_LIMITED = -32003;
+    public static final int APPROVAL_REQUIRED = -32004;
 
     private JsonRpc() {
     }

@@ -9,11 +9,16 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import io.mcpgateway.approval.ApprovalService;
 import io.mcpgateway.audit.AuditService;
 import io.mcpgateway.authz.PolicyDecisionPoint;
 import io.mcpgateway.authz.PolicyDecisionPoint.PolicyView;
 import io.mcpgateway.authz.PolicyService;
 import io.mcpgateway.common.AuthenticatedActor;
+import io.mcpgateway.guardrail.GuardrailPipeline;
+import io.mcpgateway.guardrail.InputSchemaValidator;
+import io.mcpgateway.guardrail.SecretsAndPiiDetector;
+import io.mcpgateway.ratelimit.RateLimitService;
 import io.mcpgateway.gateway.JsonRpc.Request;
 import io.mcpgateway.gateway.JsonRpc.Response;
 import io.mcpgateway.registry.McpServer;
@@ -51,6 +56,8 @@ class McpGatewayServiceTest {
     private McpBackendClient backend;
     private AuditService audit;
     private PolicyService policies;
+    private RateLimitService rateLimit;
+    private ApprovalService approvals;
     private McpGatewayService service;
 
     @BeforeEach
@@ -60,11 +67,15 @@ class McpGatewayServiceTest {
         backend = mock(McpBackendClient.class);
         audit = mock(AuditService.class);
         policies = mock(PolicyService.class);
-        // Default: a policy set that allows everything for role tool-user; individual tests
-        // override with an empty or denying set to exercise the PEP.
+        rateLimit = mock(RateLimitService.class);
+        approvals = mock(ApprovalService.class);
+        // Defaults keep the happy path open: allow-all policy set, rate limit not exceeded.
+        // Individual tests override to exercise each enforcement stage.
         when(policies.activePoliciesFor(any())).thenReturn(List.of(allowAll()));
+        when(rateLimit.allow(any(), anyString())).thenReturn(true);
         service = new McpGatewayService(registry, routing, backend, audit, policies,
-                new PolicyDecisionPoint(), MAPPER);
+                new PolicyDecisionPoint(), rateLimit, new InputSchemaValidator(),
+                new GuardrailPipeline(List.of(new SecretsAndPiiDetector())), approvals, MAPPER);
     }
 
     private static PolicyView allowAll() {
@@ -183,6 +194,61 @@ class McpGatewayServiceTest {
     }
 
     @Test
+    void rateLimitExceededDeniesWithoutBackendContact() {
+        when(rateLimit.allow(any(), anyString())).thenReturn(false);
+        when(routing.route(ALICE, "crm")).thenReturn(Optional.of(route(true, Tool.Status.ACTIVE)));
+
+        Response response = service.handle(ALICE, callRequest("crm.crm.read"));
+
+        assertThat(response.error().code()).isEqualTo(JsonRpc.RATE_LIMITED);
+        verify(backend, never()).callTool(anyString(), anyString(), any());
+    }
+
+    @Test
+    void argumentsViolatingTheRegisteredSchemaAreRejected() {
+        when(routing.route(ALICE, "strict")).thenReturn(Optional.of(new RouteSnapshot(
+                UUID.randomUUID(), "strict", "http://s", true,
+                List.of(new ToolRoute(TOOL_ID, "t", null,
+                        "{\"type\":\"object\",\"required\":[\"id\"],\"properties\":{\"id\":{\"type\":\"string\"}}}",
+                        Tool.SensitivityTier.INTERNAL, Tool.Status.ACTIVE, "h")))));
+
+        Response response = service.handle(ALICE, callRequest("strict.t"));
+
+        // callRequest sends empty arguments; "id" is required by the pinned schema (FR-GUARD-1).
+        assertThat(response.error().code()).isEqualTo(JsonRpc.INVALID_PARAMS);
+        verify(backend, never()).callTool(anyString(), anyString(), any());
+    }
+
+    @Test
+    void restrictedToolIsHeldForApprovalOnFirstCall() {
+        UUID pendingId = UUID.randomUUID();
+        when(approvals.filePending(any(), anyString(), anyString())).thenReturn(pendingId);
+        when(routing.route(ALICE, "crm"))
+                .thenReturn(Optional.of(route(true, Tool.Status.ACTIVE, Tool.SensitivityTier.RESTRICTED)));
+
+        Response response = service.handle(ALICE, callRequest("crm.crm.read"));
+
+        assertThat(response.error().code()).isEqualTo(JsonRpc.APPROVAL_REQUIRED);
+        assertThat(response.error().message()).contains(pendingId.toString());
+        verify(backend, never()).callTool(anyString(), anyString(), any());
+    }
+
+    @Test
+    void secretsInBackendResponsesAreRedactedBeforeReachingTheAgent() {
+        when(routing.route(ALICE, "crm")).thenReturn(Optional.of(route(true, Tool.Status.ACTIVE)));
+        when(backend.listTools(anyString())).thenReturn(Optional.of(liveToolsMatchingManifest()));
+        when(backend.callTool(anyString(), eq("crm.read"), any())).thenReturn(MAPPER.valueToTree(
+                Map.of("jsonrpc", "2.0", "result", Map.of("content", List.of(
+                        Map.of("type", "text", "text", "aws key AKIAIOSFODNN7EXAMPLE leaked"))))));
+
+        Response response = service.handle(ALICE, callRequest("crm.crm.read"));
+
+        assertThat(response.result().toString())
+                .doesNotContain("AKIAIOSFODNN7EXAMPLE")
+                .contains("[REDACTED:aws-access-key]");
+    }
+
+    @Test
     void toolsListOmitsKilledServersAndNonCallableTools() {
         McpServer live = entityServerWithTool();
         McpServer killed = entityServerWithTool();
@@ -202,9 +268,14 @@ class McpGatewayServiceTest {
     }
 
     private static RouteSnapshot route(boolean enabled, Tool.Status toolStatus) {
+        return route(enabled, toolStatus, Tool.SensitivityTier.INTERNAL);
+    }
+
+    private static RouteSnapshot route(boolean enabled, Tool.Status toolStatus,
+                                       Tool.SensitivityTier tier) {
         return new RouteSnapshot(UUID.randomUUID(), "crm", "http://crm:9090", enabled,
                 List.of(new ToolRoute(TOOL_ID, "crm.read", "Reads records", SCHEMA,
-                        Tool.SensitivityTier.INTERNAL, toolStatus,
+                        tier, toolStatus,
                         ToolManifestHasher.hash("crm.read", "Reads records", SCHEMA))));
     }
 

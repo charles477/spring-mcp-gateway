@@ -1,5 +1,6 @@
 package io.mcpgateway.gateway;
 
+import io.mcpgateway.approval.ApprovalService;
 import io.mcpgateway.audit.AuditRecord.Decision;
 import io.mcpgateway.audit.AuditService;
 import io.mcpgateway.authz.PolicyDecisionPoint;
@@ -14,9 +15,14 @@ import io.mcpgateway.registry.RegistryService;
 import io.mcpgateway.registry.RouteSnapshot;
 import io.mcpgateway.registry.RouteSnapshot.ToolRoute;
 import io.mcpgateway.registry.RoutingService;
+import io.mcpgateway.guardrail.Guardrail;
+import io.mcpgateway.guardrail.GuardrailPipeline;
+import io.mcpgateway.guardrail.InputSchemaValidator;
+import io.mcpgateway.ratelimit.RateLimitService;
 import io.mcpgateway.registry.Tool;
 import io.mcpgateway.registry.ToolManifestHasher;
 import java.time.LocalTime;
+import java.util.UUID;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -46,17 +52,27 @@ public class McpGatewayService {
     private final AuditService audit;
     private final PolicyService policies;
     private final PolicyDecisionPoint pdp;
+    private final RateLimitService rateLimit;
+    private final InputSchemaValidator schemaValidator;
+    private final GuardrailPipeline guardrails;
+    private final ApprovalService approvals;
     private final ObjectMapper objectMapper;
 
     public McpGatewayService(RegistryService registry, RoutingService routing,
                              McpBackendClient backend, AuditService audit, PolicyService policies,
-                             PolicyDecisionPoint pdp, ObjectMapper objectMapper) {
+                             PolicyDecisionPoint pdp, RateLimitService rateLimit,
+                             InputSchemaValidator schemaValidator, GuardrailPipeline guardrails,
+                             ApprovalService approvals, ObjectMapper objectMapper) {
         this.registry = registry;
         this.routing = routing;
         this.backend = backend;
         this.audit = audit;
         this.policies = policies;
         this.pdp = pdp;
+        this.rateLimit = rateLimit;
+        this.schemaValidator = schemaValidator;
+        this.guardrails = guardrails;
+        this.approvals = approvals;
         this.objectMapper = objectMapper;
     }
 
@@ -140,6 +156,22 @@ public class McpGatewayService {
             return deny(actor, request, qualifiedName, started, JsonRpc.TOOL_QUARANTINED,
                     "Tool is not callable (status " + tool.status() + ")");
         }
+        if (!rateLimit.allow(actor, qualifiedName)) {
+            return deny(actor, request, qualifiedName, started, JsonRpc.RATE_LIMITED,
+                    "Rate limit exceeded for " + qualifiedName);
+        }
+        String argumentsJson = request.params().path("arguments").toString();
+        List<String> schemaErrors = schemaValidator.validate(tool.inputSchema(), argumentsJson);
+        if (!schemaErrors.isEmpty()) {
+            return deny(actor, request, qualifiedName, started, JsonRpc.INVALID_PARAMS,
+                    "Arguments do not match the tool's schema: " + schemaErrors.get(0));
+        }
+        if (tool.sensitivityTier() == Tool.SensitivityTier.RESTRICTED) {
+            Response held = approvalGate(actor, request, qualifiedName, argumentsJson, started);
+            if (held != null) {
+                return held;
+            }
+        }
         return verifyManifestAndProxy(actor, request, route, tool, qualifiedName, started);
     }
 
@@ -205,9 +237,44 @@ public class McpGatewayService {
             return Response.error(request.id(), JsonRpc.UPSTREAM_ERROR,
                     upstream.path("error").path("message").asString("Backend error"));
         }
-        audit.record(actor, "tools/call", qualifiedName, Decision.ALLOWED, null,
+        // Outbound guardrail (FR-GUARD-2): the tool result is untrusted content about to enter
+        // the agent's context — leaked secrets/PII are redacted here, at the choke point.
+        Guardrail.Result scanned = guardrails.inspect(upstream.path("result").toString());
+        if (!scanned.findings().isEmpty()) {
+            log.warn("guardrail redacted {} in response from {}", scanned.findings(), qualifiedName);
+        }
+        audit.record(actor, "tools/call", qualifiedName, Decision.ALLOWED,
+                scanned.findings().isEmpty() ? null : "guardrail redacted: " + scanned.findings(),
                 System.currentTimeMillis() - started);
-        return Response.result(request.id(), upstream.path("result"));
+        return Response.result(request.id(), objectMapper.readTree(scanned.content()));
+    }
+
+    /**
+     * The human-in-the-loop gate for RESTRICTED tools (FR-APPR-1/2). First call files a pending
+     * request and returns its id; the agent re-calls with {@code params.approvalId} once an
+     * approver has granted it. The ticket is one-shot and bound to the exact arguments the
+     * approver saw.
+     *
+     * @return a hold/deny response, or null when an approval ticket was valid and consumed
+     */
+    private Response approvalGate(AuthenticatedActor actor, Request request, String qualifiedName,
+                                  String argumentsJson, long started) {
+        String approvalId = request.params().path("approvalId").asString("");
+        if (approvalId.isEmpty()) {
+            UUID pendingId = approvals.filePending(actor, qualifiedName, argumentsJson);
+            audit.record(actor, "tools/call", qualifiedName, Decision.DENIED,
+                    "held for approval " + pendingId, System.currentTimeMillis() - started);
+            return Response.error(request.id(), JsonRpc.APPROVAL_REQUIRED,
+                    "Restricted tool: approval required. Re-call with params.approvalId="
+                            + pendingId + " once approved");
+        }
+        boolean consumed = approvals.consume(actor, UUID.fromString(approvalId),
+                qualifiedName, argumentsJson);
+        if (!consumed) {
+            return deny(actor, request, qualifiedName, started, JsonRpc.DENIED,
+                    "Approval is not valid for this call (wrong state, caller, tool, or arguments)");
+        }
+        return null;
     }
 
     private Response deny(AuthenticatedActor actor, Request request, String toolRef, long started,
