@@ -10,6 +10,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import io.mcpgateway.audit.AuditService;
+import io.mcpgateway.authz.PolicyDecisionPoint;
+import io.mcpgateway.authz.PolicyDecisionPoint.PolicyView;
+import io.mcpgateway.authz.PolicyService;
 import io.mcpgateway.common.AuthenticatedActor;
 import io.mcpgateway.gateway.JsonRpc.Request;
 import io.mcpgateway.gateway.JsonRpc.Response;
@@ -47,6 +50,7 @@ class McpGatewayServiceTest {
     private RoutingService routing;
     private McpBackendClient backend;
     private AuditService audit;
+    private PolicyService policies;
     private McpGatewayService service;
 
     @BeforeEach
@@ -55,7 +59,24 @@ class McpGatewayServiceTest {
         routing = mock(RoutingService.class);
         backend = mock(McpBackendClient.class);
         audit = mock(AuditService.class);
-        service = new McpGatewayService(registry, routing, backend, audit, MAPPER);
+        policies = mock(PolicyService.class);
+        // Default: a policy set that allows everything for role tool-user; individual tests
+        // override with an empty or denying set to exercise the PEP.
+        when(policies.activePoliciesFor(any())).thenReturn(List.of(allowAll()));
+        service = new McpGatewayService(registry, routing, backend, audit, policies,
+                new PolicyDecisionPoint(), MAPPER);
+    }
+
+    private static PolicyView allowAll() {
+        return new PolicyView("p-allow", "allow-tool-users", PolicyView.Effect.ALLOW,
+                List.of(new PolicyView.Subject("role", "tool-user")),
+                List.of(new PolicyView.Resource("*", null)), null);
+    }
+
+    private static PolicyView denyRestricted() {
+        return new PolicyView("p-deny", "deny-crm", PolicyView.Effect.DENY,
+                List.of(new PolicyView.Subject("role", "tool-user")),
+                List.of(new PolicyView.Resource("crm.*", null)), null);
     }
 
     @Test
@@ -121,6 +142,44 @@ class McpGatewayServiceTest {
 
         assertThat(response.error().code()).isEqualTo(JsonRpc.TOOL_QUARANTINED);
         verify(backend, never()).listTools(anyString());
+    }
+
+    @Test
+    void policyDenyBlocksTheCallBeforeAnyBackendContact() {
+        when(policies.activePoliciesFor(any())).thenReturn(List.of(allowAll(), denyRestricted()));
+        when(routing.route(ALICE, "crm")).thenReturn(Optional.of(route(true, Tool.Status.ACTIVE)));
+
+        Response response = service.handle(ALICE, callRequest("crm.crm.read"));
+
+        // Explicit deny wins over the matching allow (FR-AUTHZ-3), enforced by the PEP
+        // (FR-AUTHZ-4) before manifest verification or proxying.
+        assertThat(response.error().code()).isEqualTo(JsonRpc.DENIED);
+        assertThat(response.error().message()).isEqualTo("Denied by policy");
+        verify(backend, never()).listTools(anyString());
+        verify(backend, never()).callTool(anyString(), anyString(), any());
+    }
+
+    @Test
+    void emptyPolicySetDeniesByDefault() {
+        when(policies.activePoliciesFor(any())).thenReturn(List.of());
+        when(routing.route(ALICE, "crm")).thenReturn(Optional.of(route(true, Tool.Status.ACTIVE)));
+
+        Response response = service.handle(ALICE, callRequest("crm.crm.read"));
+
+        assertThat(response.error().code()).isEqualTo(JsonRpc.DENIED);
+        verify(backend, never()).callTool(anyString(), anyString(), any());
+    }
+
+    @Test
+    void toolsListHidesPolicyDeniedTools() {
+        when(policies.activePoliciesFor(any())).thenReturn(List.of(allowAll(), denyRestricted()));
+        when(registry.visibleServers(ALICE)).thenReturn(List.of(entityServerWithTool()));
+
+        Response response = service.handle(ALICE, new Request("2.0", MAPPER.valueToTree(1),
+                "tools/list", null));
+
+        // crm.crm.read matches the deny pattern, so it must not appear at all (FR-AUTHZ-4).
+        assertThat(response.result().path("tools")).isEmpty();
     }
 
     @Test
