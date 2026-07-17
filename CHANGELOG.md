@@ -4,6 +4,20 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-07-17
+
+### Added
+- Custom RBAC+ABAC policy engine: framework-free PDP with versioned policy
+  documents, role/user subjects, glob resources, sensitivity tiers, and ANDed
+  ABAC conditions incl. overnight time ranges (FR-AUTHZ-1)
+- Deny-by-default and explicit-deny-wins evaluation (FR-AUTHZ-2, FR-AUTHZ-3)
+- PEP embedded in the gateway pipeline: `tools/call` checked before proxying,
+  `tools/list` hides denied tools (FR-AUTHZ-4)
+- Decision explanations naming every matched and deciding policy, surfaced to
+  audit records and admins — never to the denied agent (FR-AUTHZ-5)
+- Policy lifecycle (DRAFT/ACTIVE/ARCHIVED, immutable history) with dry-run
+  simulation overlaying drafts on the live set (FR-AUTHZ-6)
+
 ## [0.3.0] - 2026-07-16
 
 ### Added
@@ -48,6 +62,7 @@ All notable changes to this project are documented here. The format follows
 - Requirements specification with per-requirement acceptance criteria (`docs/REQUIREMENTS.md`)
 - README with architecture and prior-art comparison; contribution conventions (`CONTRIBUTING.md`)
 
+[0.4.0]: https://github.com/charles477/spring-mcp-gateway/releases/tag/v0.4.0
 [0.3.0]: https://github.com/charles477/spring-mcp-gateway/releases/tag/v0.3.0
 [0.2.0]: https://github.com/charles477/spring-mcp-gateway/releases/tag/v0.2.0
 [0.1.0]: https://github.com/charles477/spring-mcp-gateway/releases/tag/v0.1.0
