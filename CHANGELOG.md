@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] - 2026-07-17
+
+### Added
+- Prometheus metrics at `/actuator/prometheus`; Prometheus + Grafana in Docker Compose (FR-OBS-2)
+- OpenAPI documentation for Admin and MCP APIs via springdoc (FR-ADMIN-1)
+- ADRs 0001–0004 (modular monolith, custom PDP vs OPA, RLS strategy, rug-pull defense)
+- `docs/DEMO.md` — 12-scene demo script mapped to requirements
+
+## [0.5.0] - 2026-07-17
+
+### Added
+- Redis Lua token-bucket rate limiting per (tenant, user, tool) (FR-RATE-1)
+- Input validation against the manifest-pinned JSON Schema (FR-GUARD-1)
+- Guardrail chain redacting secrets/PII from tool responses (FR-GUARD-2)
+- Approval workflow for RESTRICTED tools: one-shot, argument-hash-bound tickets (FR-APPR-1/2)
+- Postgres row-level security for tenant isolation via `gateway_reader` role (FR-TENANT-1)
+
 ## [0.4.0] - 2026-07-17
 
 ### Added
@@ -62,6 +79,8 @@ All notable changes to this project are documented here. The format follows
 - Requirements specification with per-requirement acceptance criteria (`docs/REQUIREMENTS.md`)
 - README with architecture and prior-art comparison; contribution conventions (`CONTRIBUTING.md`)
 
+[0.6.0]: https://github.com/charles477/spring-mcp-gateway/releases/tag/v0.6.0
+[0.5.0]: https://github.com/charles477/spring-mcp-gateway/releases/tag/v0.5.0
 [0.4.0]: https://github.com/charles477/spring-mcp-gateway/releases/tag/v0.4.0
 [0.3.0]: https://github.com/charles477/spring-mcp-gateway/releases/tag/v0.3.0
 [0.2.0]: https://github.com/charles477/spring-mcp-gateway/releases/tag/v0.2.0

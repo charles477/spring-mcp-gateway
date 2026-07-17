@@ -90,20 +90,25 @@ The Keycloak demo realm (`mcp-gateway`) ships with three users you can use to ob
 
 ## Implementation status
 
-- [x] Project skeleton (Maven, hexagonal package layout)
-- [x] Local infra (Docker Compose: Postgres, Redis, Keycloak + demo realm)
-- [x] Requirements locked (`docs/REQUIREMENTS.md`)
-- [ ] OIDC AuthN end-to-end
-- [ ] MCP server/tool registry + JSON-RPC proxy
-- [ ] Custom RBAC/ABAC policy engine
-- [ ] Rate limiting, guardrail PoC, approval PoC, tenancy RLS
-- [ ] Observability stack, Admin API, integration tests
-- [ ] ADRs, demo script, v1.0.0 tag
+- [x] Project skeleton (Maven, hexagonal package layout) + Docker Compose infra — `v0.1.0`
+- [x] OIDC AuthN end-to-end against Keycloak, config-only IdP swap — `v0.2.0`
+- [x] Registry + MCP JSON-RPC proxy, rug-pull defense, kill switch, routing cache w/ Redis pub/sub, circuit breakers, audit trail — `v0.3.0`
+- [x] Custom RBAC/ABAC policy engine: deny-by-default, explicit-deny-wins, explanations, dry-run — `v0.4.0`
+- [x] Rate limiting (Redis Lua token bucket), schema guardrails, secret redaction, approval workflow, tenancy RLS — `v0.5.0`
+- [x] Prometheus metrics + Grafana/Prometheus compose stack, OpenAPI docs — `v0.6.0`
+- [x] ADRs, demo script (this release)
+
+**Still roadmap** (see `docs/REQUIREMENTS.md` §6): OpenTelemetry distributed tracing + prebuilt
+Grafana dashboards, Testcontainers integration suite covering every FR end-to-end, API-key auth
+for service accounts, secrets injection, Helm chart, session taint tracking, agent-as-principal
+identity, and the rest of §6. The v1.0.0 tag waits for the Definition of Done in §8 — every FR
+covered by an automated test, not only the live drills recorded in `docs/DEMO.md`.
 
 ## Documentation
 
-- [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) — full functional/non-functional requirements and v1.0.0 Definition of Done
-- `docs/adr/` — architecture decision records (coming with implementation)
+- [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) — full requirements with acceptance criteria and the v1.0.0 Definition of Done
+- [`docs/DEMO.md`](docs/DEMO.md) — 12-scene demo script, each scene mapped to a requirement
+- [`docs/adr/`](docs/adr/) — architecture decision records: modular monolith, custom PDP vs OPA, RLS strategy, rug-pull defense
 
 ## License
 
