@@ -2,6 +2,10 @@ package io.mcpgateway.gateway;
 
 import io.mcpgateway.audit.AuditRecord.Decision;
 import io.mcpgateway.audit.AuditService;
+import io.mcpgateway.authz.PolicyDecisionPoint;
+import io.mcpgateway.authz.PolicyDecisionPoint.EvaluationRequest;
+import io.mcpgateway.authz.PolicyDecisionPoint.PolicyView;
+import io.mcpgateway.authz.PolicyService;
 import io.mcpgateway.common.AuthenticatedActor;
 import io.mcpgateway.gateway.JsonRpc.Request;
 import io.mcpgateway.gateway.JsonRpc.Response;
@@ -12,6 +16,7 @@ import io.mcpgateway.registry.RouteSnapshot.ToolRoute;
 import io.mcpgateway.registry.RoutingService;
 import io.mcpgateway.registry.Tool;
 import io.mcpgateway.registry.ToolManifestHasher;
+import java.time.LocalTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -39,14 +44,19 @@ public class McpGatewayService {
     private final RoutingService routing;
     private final McpBackendClient backend;
     private final AuditService audit;
+    private final PolicyService policies;
+    private final PolicyDecisionPoint pdp;
     private final ObjectMapper objectMapper;
 
     public McpGatewayService(RegistryService registry, RoutingService routing,
-                             McpBackendClient backend, AuditService audit, ObjectMapper objectMapper) {
+                             McpBackendClient backend, AuditService audit, PolicyService policies,
+                             PolicyDecisionPoint pdp, ObjectMapper objectMapper) {
         this.registry = registry;
         this.routing = routing;
         this.backend = backend;
         this.audit = audit;
+        this.policies = policies;
+        this.pdp = pdp;
         this.objectMapper = objectMapper;
     }
 
@@ -67,15 +77,21 @@ public class McpGatewayService {
      */
     private Response listTools(AuthenticatedActor actor, Request request) {
         long started = System.currentTimeMillis();
+        List<PolicyView> activePolicies = policies.activePoliciesFor(actor);
         List<Map<String, Object>> toolList = new ArrayList<>();
         for (McpServer server : registry.visibleServers(actor)) {
             if (!server.isEnabled()) {
                 continue;
             }
             for (Tool tool : server.getTools()) {
-                if (tool.isCallable()) {
+                String qualifiedName = server.getName() + "." + tool.getName();
+                // PEP on the listing too (FR-AUTHZ-4): a tool the actor may not call
+                // does not exist from their perspective.
+                boolean permitted = pdp.evaluate(activePolicies, evaluationRequest(
+                        actor, qualifiedName, tool.getSensitivityTier().name())).allowed();
+                if (tool.isCallable() && permitted) {
                     toolList.add(Map.of(
-                            "name", server.getName() + "." + tool.getName(),
+                            "name", qualifiedName,
                             "description", tool.getDescription() == null ? "" : tool.getDescription(),
                             "inputSchema", objectMapper.readTree(tool.getInputSchema())));
                 }
@@ -112,6 +128,14 @@ public class McpGatewayService {
                     "Unknown tool: " + qualifiedName);
         }
         ToolRoute tool = toolLookup.get();
+        // The PEP (FR-AUTHZ-4): the PDP's verdict is enforced before anything else is revealed
+        // about the tool; the explanation lands in the audit record, not the agent response.
+        PolicyDecisionPoint.Decision verdict = pdp.evaluate(policies.activePoliciesFor(actor),
+                evaluationRequest(actor, qualifiedName, tool.sensitivityTier().name()));
+        if (!verdict.allowed()) {
+            return deny(actor, request, qualifiedName, started, JsonRpc.DENIED,
+                    "Denied by policy", verdict.explanation());
+        }
         if (!tool.callable()) {
             return deny(actor, request, qualifiedName, started, JsonRpc.TOOL_QUARANTINED,
                     "Tool is not callable (status " + tool.status() + ")");
@@ -188,8 +212,23 @@ public class McpGatewayService {
 
     private Response deny(AuthenticatedActor actor, Request request, String toolRef, long started,
                           int code, String message) {
+        return deny(actor, request, toolRef, started, code, message, message);
+    }
+
+    /**
+     * Denies with a caller-facing message distinct from the audited detail: policy explanations
+     * belong to operators, not to the (possibly adversarial) agent being denied.
+     */
+    private Response deny(AuthenticatedActor actor, Request request, String toolRef, long started,
+                          int code, String message, String auditDetail) {
         audit.record(actor, "tools/call", toolRef.isEmpty() ? null : toolRef, Decision.DENIED,
-                message, System.currentTimeMillis() - started);
+                auditDetail, System.currentTimeMillis() - started);
         return Response.error(request.id(), code, message);
+    }
+
+    private static EvaluationRequest evaluationRequest(AuthenticatedActor actor,
+                                                       String qualifiedName, String tier) {
+        return new EvaluationRequest(actor.subject(), List.copyOf(actor.roles()),
+                qualifiedName, tier, LocalTime.now());
     }
 }
