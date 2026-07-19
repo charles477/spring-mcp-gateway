@@ -104,6 +104,16 @@ for service accounts, secrets injection, Helm chart, session taint tracking, age
 identity, and the rest of §6. The v1.0.0 tag waits for the Definition of Done in §8 — every FR
 covered by an automated test, not only the live drills recorded in `docs/DEMO.md`.
 
+## Console UI
+
+A React + TypeScript admin console lives in [`ui/`](ui/) — a dark "mission console" with five screens: Dashboard (live decision stream + AI digest), Registry (manifest hashes, quarantine re-approval, kill switches), Policies (list + AI copilot: plain English → draft JSON → dry-run → activate), Approvals, and Audit. Sign-in goes against Keycloak; the token stays in memory only.
+
+```bash
+cd ui && npm install && npm run dev   # http://localhost:5173, proxies to gateway :8080 and Keycloak :8081
+```
+
+**AI features** (policy copilot, activity digest) call the Claude API server-side via `/admin/ai/*`: set `ANTHROPIC_API_KEY` in the gateway's environment to enable them. The key never reaches the browser, and the copilot only ever produces drafts that must pass the same simulate-then-activate gate as hand-written policies. Without a key the endpoints return 503 and the UI degrades gracefully.
+
 ## Documentation
 
 - [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) — full requirements with acceptance criteria and the v1.0.0 Definition of Done

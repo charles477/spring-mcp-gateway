@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] - 2026-07-19
+
+### Added
+- React + TypeScript admin console (`ui/`): Dashboard, Registry, Policies with
+  AI copilot and dry-run activation, Approvals, Audit — dark mission-console theme
+- `GET /admin/audit` query endpoint, tenant-scoped by role (FR-AUDIT-3)
+- `/admin/ai/draft-policy` and `/admin/ai/digest`: server-side Claude API calls
+  (key in gateway env only); graceful 503 when unconfigured; copilot output is
+  draft-only and passes the standard simulate-then-activate gate
+- CI job typechecking and building the console UI
+
 ## [0.6.0] - 2026-07-17
 
 ### Added
@@ -79,6 +90,7 @@ All notable changes to this project are documented here. The format follows
 - Requirements specification with per-requirement acceptance criteria (`docs/REQUIREMENTS.md`)
 - README with architecture and prior-art comparison; contribution conventions (`CONTRIBUTING.md`)
 
+[0.7.0]: https://github.com/charles477/spring-mcp-gateway/releases/tag/v0.7.0
 [0.6.0]: https://github.com/charles477/spring-mcp-gateway/releases/tag/v0.6.0
 [0.5.0]: https://github.com/charles477/spring-mcp-gateway/releases/tag/v0.5.0
 [0.4.0]: https://github.com/charles477/spring-mcp-gateway/releases/tag/v0.4.0

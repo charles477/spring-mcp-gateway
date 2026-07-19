@@ -21,3 +21,18 @@ jobs:
 
       - name: Build and test
         run: ./mvnw --batch-mode verify
+
+  ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Typecheck and build console UI
+        working-directory: ui
+        run: |
+          npm ci
+          npm run build
